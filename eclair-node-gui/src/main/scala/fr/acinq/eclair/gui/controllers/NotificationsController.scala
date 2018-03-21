@@ -9,6 +9,7 @@ import javafx.scene.image.Image
 import javafx.scene.layout.{GridPane, VBox}
 import javafx.util.Duration
 
+import fr.acinq.eclair.gui.utils.ContextMenuUtils
 import grizzled.slf4j.Logging
 
 sealed trait NotificationType
@@ -52,38 +53,52 @@ class NotificationsController extends Logging {
         // set notification content
         notifPaneController.titleLabel.setText(title)
         notifPaneController.messageLabel.setText(message.capitalize)
-        notificationType match {
+        val autoDismissed = notificationType match {
           case NOTIFICATION_SUCCESS => {
             notifPaneController.rootPane.setStyle("-fx-border-color: #28d087")
             notifPaneController.icon.setImage(successIcon)
+            true
           }
           case NOTIFICATION_ERROR => {
             notifPaneController.rootPane.setStyle("-fx-border-color: #d43c4e")
             notifPaneController.icon.setImage(errorIcon)
+            false
           }
           case NOTIFICATION_INFO => {
             notifPaneController.rootPane.setStyle("-fx-border-color: #409be6")
             notifPaneController.icon.setImage(infoIcon)
+            true
           }
-          case _ =>
+          case _ => true
         }
 
         // in/out animations
         val showAnimation = getShowAnimation(notifPaneController.rootPane)
+
         val dismissAnimation = getDismissAnimation(notifPaneController.rootPane)
         dismissAnimation.setOnFinished(new EventHandler[ActionEvent] {
           override def handle(event: ActionEvent) = notifsVBox.getChildren.remove(root)
         })
-        notifPaneController.closeButton.setOnAction(new EventHandler[ActionEvent] {
+        notifPaneController.copyButton.setOnAction(new EventHandler[ActionEvent] {
           override def handle(event: ActionEvent) = {
-            dismissAnimation.stop
-            dismissAnimation.setDelay(Duration.ZERO)
-            dismissAnimation.play
+            dismissAnimation.stop() // automatic dismiss is cancelled
+            ContextMenuUtils.copyToClipboard(message)
+            notifPaneController.copyButton.setOnAction(null)
+            notifPaneController.copyButton.setText("Copied!")
           }
         })
-        showAnimation.play
-        dismissAnimation.setDelay(Duration.seconds(12))
-        dismissAnimation.play
+        notifPaneController.closeButton.setOnAction(new EventHandler[ActionEvent] {
+          override def handle(event: ActionEvent) = {
+            dismissAnimation.stop()
+            dismissAnimation.setDelay(Duration.ZERO)
+            dismissAnimation.play()
+          }
+        })
+        showAnimation.play()
+        if (autoDismissed) {
+          dismissAnimation.setDelay(Duration.seconds(12))
+          dismissAnimation.play()
+        }
       }
     })
   }

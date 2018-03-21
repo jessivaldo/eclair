@@ -4,7 +4,7 @@ import java.net.InetSocketAddress
 
 import fr.acinq.bitcoin.BinaryData
 import fr.acinq.bitcoin.Crypto.{Point, PublicKey, Scalar}
-import fr.acinq.eclair.UInt64
+import fr.acinq.eclair.{ShortChannelId, UInt64}
 
 /**
   * Created by PM on 15/11/2016.
@@ -31,10 +31,11 @@ case class Ping(pongLength: Int, data: BinaryData) extends SetupMessage
 
 case class Pong(data: BinaryData) extends SetupMessage
 
-case class ChannelReestablish(
-                               channelId: BinaryData,
-                               nextLocalCommitmentNumber: Long,
-                               nextRemoteRevocationNumber: Long) extends ChannelMessage with HasChannelId
+case class ChannelReestablish(channelId: BinaryData,
+                              nextLocalCommitmentNumber: Long,
+                              nextRemoteRevocationNumber: Long,
+                              yourLastPerCommitmentSecret: Option[Scalar] = None,
+                              myCurrentPerCommitmentPoint: Option[Point] = None) extends ChannelMessage with HasChannelId
 
 case class OpenChannel(chainHash: BinaryData,
                        temporaryChannelId: BinaryData,
@@ -120,7 +121,7 @@ case class UpdateFee(channelId: BinaryData,
                      feeratePerKw: Long) extends ChannelMessage with UpdateMessage with HasChannelId
 
 case class AnnouncementSignatures(channelId: BinaryData,
-                                  shortChannelId: Long,
+                                  shortChannelId: ShortChannelId,
                                   nodeSignature: BinaryData,
                                   bitcoinSignature: BinaryData) extends RoutingMessage with HasChannelId
 
@@ -130,24 +131,28 @@ case class ChannelAnnouncement(nodeSignature1: BinaryData,
                                bitcoinSignature2: BinaryData,
                                features: BinaryData,
                                chainHash: BinaryData,
-                               shortChannelId: Long,
+                               shortChannelId: ShortChannelId,
                                nodeId1: PublicKey,
                                nodeId2: PublicKey,
                                bitcoinKey1: PublicKey,
                                bitcoinKey2: PublicKey) extends RoutingMessage
 
+case class Color(r: Byte, g: Byte, b: Byte) {
+  override def toString: String = f"#$r%02x$g%02x$b%02x" // to hexa s"#  ${r}%02x ${r & 0xFF}${g & 0xFF}${b & 0xFF}"
+}
+
 case class NodeAnnouncement(signature: BinaryData,
                             features: BinaryData,
                             timestamp: Long,
                             nodeId: PublicKey,
-                            rgbColor: (Byte, Byte, Byte),
+                            rgbColor: Color,
                             alias: String,
                             // TODO: check address order + support padding data (type 0)
                             addresses: List[InetSocketAddress]) extends RoutingMessage
 
 case class ChannelUpdate(signature: BinaryData,
                          chainHash: BinaryData,
-                         shortChannelId: Long,
+                         shortChannelId: ShortChannelId,
                          timestamp: Long,
                          flags: BinaryData,
                          cltvExpiryDelta: Int,
@@ -155,6 +160,6 @@ case class ChannelUpdate(signature: BinaryData,
                          feeBaseMsat: Long,
                          feeProportionalMillionths: Long) extends RoutingMessage
 
-case class PerHopPayload(channel_id: Long,
+case class PerHopPayload(channel_id: ShortChannelId,
                          amtToForward: Long,
                          outgoingCltvValue: Long)

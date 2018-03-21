@@ -1,10 +1,8 @@
 package fr.acinq.eclair.gui
 
 import java.io.{File, FileWriter}
-import java.text.NumberFormat
-import java.util.Locale
 
-import akka.pattern.ask
+import akka.pattern.{AskTimeoutException, ask}
 import akka.util.Timeout
 import fr.acinq.bitcoin.MilliSatoshi
 import fr.acinq.eclair._
@@ -22,7 +20,7 @@ import scala.util.{Failure, Success}
   */
 class Handlers(fKit: Future[Kit])(implicit ec: ExecutionContext = ExecutionContext.Implicits.global) extends Logging {
 
-  implicit val timeout = Timeout(30 seconds)
+  implicit val timeout = Timeout(60 seconds)
 
   private var notifsController: Option[NotificationsController] = None
 
@@ -40,18 +38,28 @@ class Handlers(fKit: Future[Kit])(implicit ec: ExecutionContext = ExecutionConte
   def open(nodeUri: NodeURI, channel: Option[Peer.OpenChannel]) = {
     logger.info(s"opening a connection to nodeUri=$nodeUri")
     (for {
-          kit <- fKit
-          conn <- kit.switchboard ? Peer.Connect(nodeUri)
-          _ <- channel match {
-            case Some(o) =>
-              logger.info(s"opening a channel with remoteNodeId=${o.remoteNodeId}")
-              kit.switchboard ? o
-            case None => Future.successful(0) // nothing to do
-          }
-    } yield conn) onFailure {
-          case t: Throwable =>
-            t.printStackTrace()
-            notification("Connection failed", s"${nodeUri.address.getHostString}:${nodeUri.address.getPort}", NOTIFICATION_ERROR)
+      kit <- fKit
+      conn <- kit.switchboard ? Peer.Connect(nodeUri)
+    } yield (kit, conn)) onComplete {
+      case Success((k, _)) =>
+        logger.info(s"connection to $nodeUri successful")
+        channel match {
+          case Some(openChannel) =>
+            k.switchboard ? openChannel onComplete {
+              case Success(s) =>
+                logger.info(s"successfully opened channel $s")
+                notification("Channel created", s.toString, NOTIFICATION_SUCCESS)
+              case Failure(_: AskTimeoutException) =>
+                logger.info("opening channel is taking a long time, notifications will not be shown")
+              case Failure(t) =>
+                logger.info("could not open channel ", t)
+                notification("Channel creation failed", t.getMessage, NOTIFICATION_ERROR)
+            }
+          case None =>
+        }
+      case Failure(t) =>
+        logger.error(s"could not create connection to $nodeUri ", t)
+        notification("Connection failed", t.getMessage, NOTIFICATION_ERROR)
     }
   }
 
@@ -59,40 +67,28 @@ class Handlers(fKit: Future[Kit])(implicit ec: ExecutionContext = ExecutionConte
     val amountMsat = overrideAmountMsat_opt
       .orElse(req.amount.map(_.amount))
       .getOrElse(throw new RuntimeException("you need to manually specify an amount for this payment request"))
-
     logger.info(s"sending $amountMsat to ${req.paymentHash} @ ${req.nodeId}")
     val sendPayment = req.minFinalCltvExpiry match {
-      case None => SendPayment(amountMsat, req.paymentHash, req.nodeId, req.routingInfo())
-      case Some(minFinalCltvExpiry) => SendPayment(amountMsat, req.paymentHash, req.nodeId, req.routingInfo(), minFinalCltvExpiry = minFinalCltvExpiry)
+      case None => SendPayment(amountMsat, req.paymentHash, req.nodeId, req.routingInfo)
+      case Some(minFinalCltvExpiry) => SendPayment(amountMsat, req.paymentHash, req.nodeId, req.routingInfo, finalCltvExpiry = minFinalCltvExpiry)
     }
+    // completed payment will be handled from GUIUpdater by listening to PaymentSucceeded/PaymentFailed events
     (for {
       kit <- fKit
       res <- (kit.paymentInitiator ? sendPayment).mapTo[PaymentResult]
-    } yield res)
-      .onComplete {
-        case Success(_: PaymentSucceeded) =>
-          val message = s"${NumberFormat.getInstance(Locale.getDefault).format(amountMsat / 1000)} satoshis"
-          notification("Payment Sent", message, NOTIFICATION_SUCCESS)
-        case Success(PaymentFailed(_, failures)) =>
-          val message = s"${
-            failures.lastOption match {
-              case Some(LocalFailure(t)) => t.getMessage
-              case Some(RemoteFailure(_, e)) => e.failureMessage
-              case _ => "Unknown error"
-            }
-          } (${failures.size} attempts)"
-          notification("Payment Failed", message, NOTIFICATION_ERROR)
-        case Failure(t) =>
-          val message = t.getMessage
-          notification("Payment Failed", message, NOTIFICATION_ERROR)
-      }
+    } yield res).recover {
+      case _: AskTimeoutException =>
+        logger.info("sending payment is taking a long time, notifications will not be shown")
+      case t =>
+        val message = t.getMessage
+        notification("Payment Failed", message, NOTIFICATION_ERROR)
+    }
   }
 
   def receive(amountMsat_opt: Option[MilliSatoshi], description: String): Future[String] = for {
     kit <- fKit
-    res <- (kit.paymentHandler ? ReceivePayment(amountMsat_opt, description)).mapTo[PaymentRequest].map(PaymentRequest.write(_))
+    res <- (kit.paymentHandler ? ReceivePayment(amountMsat_opt, description)).mapTo[PaymentRequest].map(PaymentRequest.write)
   } yield res
-
 
   def exportToDot(file: File) = for {
     kit <- fKit
@@ -118,6 +114,6 @@ class Handlers(fKit: Future[Kit])(implicit ec: ExecutionContext = ExecutionConte
     * @param showAppName      true if you want the notification title to be preceded by "Eclair - ". True by default
     */
   def notification(title: String, message: String, notificationType: NotificationType = NOTIFICATION_NONE, showAppName: Boolean = true) = {
-    notifsController.map(_.addNotification(if (showAppName) s"Eclair - $title" else title, message, notificationType))
+    notifsController.foreach(_.addNotification(if (showAppName) s"Eclair - $title" else title, message, notificationType))
   }
 }

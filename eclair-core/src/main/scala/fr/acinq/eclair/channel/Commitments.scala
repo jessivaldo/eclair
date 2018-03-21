@@ -3,7 +3,7 @@ package fr.acinq.eclair.channel
 import akka.event.LoggingAdapter
 import fr.acinq.bitcoin.Crypto.{Point, PrivateKey, sha256}
 import fr.acinq.bitcoin.{BinaryData, Crypto, Satoshi, Transaction}
-import fr.acinq.eclair.crypto.{Generators, ShaChain, Sphinx}
+import fr.acinq.eclair.crypto.{Generators, KeyManager, ShaChain, Sphinx}
 import fr.acinq.eclair.payment.Origin
 import fr.acinq.eclair.transactions.Transactions._
 import fr.acinq.eclair.transactions._
@@ -47,7 +47,8 @@ case class Commitments(localParams: LocalParams, remoteParams: RemoteParams,
 
   def hasTimedoutOutgoingHtlcs(blockheight: Long): Boolean =
     localCommit.spec.htlcs.exists(htlc => htlc.direction == OUT && blockheight >= htlc.add.expiry) ||
-      remoteCommit.spec.htlcs.exists(htlc => htlc.direction == IN && blockheight >= htlc.add.expiry)
+      remoteCommit.spec.htlcs.exists(htlc => htlc.direction == IN && blockheight >= htlc.add.expiry) ||
+      remoteNextCommitInfo.left.toOption.map(_.nextRemoteCommit.spec.htlcs.exists(htlc => htlc.direction == IN && blockheight >= htlc.add.expiry)).getOrElse(false)
 
   def addLocalProposal(proposal: UpdateMessage): Commitments = Commitments.addLocalProposal(this, proposal)
 
@@ -85,6 +86,16 @@ object Commitments {
     val blockCount = Globals.blockCount.get()
     if (cmd.expiry <= blockCount) {
       return Left(ExpiryCannotBeInThePast(commitments.channelId, cmd.expiry, blockCount))
+    }
+    val minExpiry = blockCount + Channel.MIN_CLTV_EXPIRY
+    // we reject expiry=minExpiry, because if a new block has just been found maybe the counterparty will get notified before us, consider that the expiry is too soon and close the channel
+    if (cmd.expiry <= minExpiry) {
+      return Left(ExpiryTooSmall(commitments.channelId, minimum = minExpiry, actual = cmd.expiry, blockCount = blockCount))
+    }
+    val maxExpiry = blockCount + Channel.MAX_CLTV_EXPIRY
+    // we reject expiry=maxExpiry, because if a new block has just been found maybe the counterparty will get notified before us, consider that the expiry is too big and close the channel
+    if (cmd.expiry >= maxExpiry) {
+      return Left(ExpiryTooBig(commitments.channelId, maximum = maxExpiry, actual = cmd.expiry, blockCount = blockCount))
     }
 
     if (cmd.amountMsat < commitments.remoteParams.htlcMinimumMsat) {
@@ -132,10 +143,17 @@ object Commitments {
     }
 
     val blockCount = Globals.blockCount.get()
-    // we need a reasonable amount of time to pull the funds before the sender can get refunded
-    val minExpiry = blockCount + 3
+    if (add.expiry <= blockCount) {
+      throw ExpiryCannotBeInThePast(commitments.channelId, add.expiry, blockCount)
+    }
+    // we need a reasonable amount of time to pull the funds before the sender can get refunded (see BOLT 2 and BOLT 11 for a calculation and rationale)
+    val minExpiry = blockCount + Channel.MIN_CLTV_EXPIRY
     if (add.expiry < minExpiry) {
       throw ExpiryTooSmall(commitments.channelId, minimum = minExpiry, actual = add.expiry, blockCount = blockCount)
+    }
+    val maxExpiry = blockCount + Channel.MAX_CLTV_EXPIRY
+    if (add.expiry > maxExpiry) {
+      throw ExpiryTooBig(commitments.channelId, maximum = maxExpiry, actual = add.expiry, blockCount = blockCount)
     }
 
     if (add.amountMsat < commitments.localParams.htlcMinimumMsat) {
@@ -194,9 +212,9 @@ object Commitments {
       case None => throw UnknownHtlcId(commitments.channelId, cmd.id)
     }
 
-  def receiveFulfill(commitments: Commitments, fulfill: UpdateFulfillHtlc): Either[Commitments, (Commitments, Origin)] =
+  def receiveFulfill(commitments: Commitments, fulfill: UpdateFulfillHtlc): Either[Commitments, (Commitments, Origin, UpdateAddHtlc)] =
     getHtlcCrossSigned(commitments, OUT, fulfill.id) match {
-      case Some(htlc) if htlc.paymentHash == sha256(fulfill.paymentPreimage) => Right((addRemoteProposal(commitments, fulfill), commitments.originChannels(fulfill.id)))
+      case Some(htlc) if htlc.paymentHash == sha256(fulfill.paymentPreimage) => Right((addRemoteProposal(commitments, fulfill), commitments.originChannels(fulfill.id), htlc))
       case Some(htlc) => throw InvalidHtlcPreimage(commitments.channelId, fulfill.id)
       case None => throw UnknownHtlcId(commitments.channelId, fulfill.id)
     }
@@ -249,20 +267,20 @@ object Commitments {
     }
   }
 
-  def receiveFail(commitments: Commitments, fail: UpdateFailHtlc): Either[Commitments, (Commitments, Origin)] =
+  def receiveFail(commitments: Commitments, fail: UpdateFailHtlc): Either[Commitments, (Commitments, Origin, UpdateAddHtlc)] =
     getHtlcCrossSigned(commitments, OUT, fail.id) match {
-      case Some(htlc) => Right((addRemoteProposal(commitments, fail), commitments.originChannels(fail.id)))
+      case Some(htlc) => Right((addRemoteProposal(commitments, fail), commitments.originChannels(fail.id), htlc))
       case None => throw UnknownHtlcId(commitments.channelId, fail.id)
     }
 
-  def receiveFailMalformed(commitments: Commitments, fail: UpdateFailMalformedHtlc): Either[Commitments, (Commitments, Origin)] = {
+  def receiveFailMalformed(commitments: Commitments, fail: UpdateFailMalformedHtlc): Either[Commitments, (Commitments, Origin, UpdateAddHtlc)] = {
     // A receiving node MUST fail the channel if the BADONION bit in failure_code is not set for update_fail_malformed_htlc.
     if ((fail.failureCode & FailureMessageCodecs.BADONION) == 0) {
       throw InvalidFailureCode(commitments.channelId)
     }
 
     getHtlcCrossSigned(commitments, OUT, fail.id) match {
-      case Some(htlc) => Right((addRemoteProposal(commitments, fail), commitments.originChannels(fail.id)))
+      case Some(htlc) => Right((addRemoteProposal(commitments, fail), commitments.originChannels(fail.id), htlc))
       case None => throw UnknownHtlcId(commitments.channelId, fail.id)
     }
   }
@@ -328,7 +346,7 @@ object Commitments {
 
   def revocationHash(seed: BinaryData, index: Long): BinaryData = Crypto.sha256(revocationPreimage(seed, index))
 
-  def sendCommit(commitments: Commitments): (Commitments, CommitSig) = {
+  def sendCommit(commitments: Commitments, keyManager: KeyManager): (Commitments, CommitSig) = {
     import commitments._
     commitments.remoteNextCommitInfo match {
       case Right(_) if !localHasChanges(commitments) =>
@@ -336,12 +354,11 @@ object Commitments {
       case Right(remoteNextPerCommitmentPoint) =>
         // remote commitment will includes all local changes + remote acked changes
         val spec = CommitmentSpec.reduce(remoteCommit.spec, remoteChanges.acked, localChanges.proposed)
-        val (remoteCommitTx, htlcTimeoutTxs, htlcSuccessTxs) = makeRemoteTxs(remoteCommit.index + 1, localParams, remoteParams, commitInput, remoteNextPerCommitmentPoint, spec)
-        val sig = Transactions.sign(remoteCommitTx, localParams.fundingPrivKey)
+        val (remoteCommitTx, htlcTimeoutTxs, htlcSuccessTxs) = makeRemoteTxs(keyManager, remoteCommit.index + 1, localParams, remoteParams, commitInput, remoteNextPerCommitmentPoint, spec)
+        val sig = keyManager.sign(remoteCommitTx, keyManager.fundingPublicKey(localParams.channelKeyPath))
 
         val sortedHtlcTxs: Seq[TransactionWithInputInfo] = (htlcTimeoutTxs ++ htlcSuccessTxs).sortBy(_.input.outPoint.index)
-        val htlcKey = Generators.derivePrivKey(localParams.htlcKey, remoteNextPerCommitmentPoint)
-        val htlcSigs = sortedHtlcTxs.map(Transactions.sign(_, htlcKey))
+        val htlcSigs = sortedHtlcTxs.map(keyManager.sign(_, keyManager.htlcPoint(localParams.channelKeyPath), remoteNextPerCommitmentPoint))
 
         // don't sign if they don't get paid
         val commitSig = CommitSig(
@@ -360,7 +377,7 @@ object Commitments {
     }
   }
 
-  def receiveCommit(commitments: Commitments, commit: CommitSig)(implicit log: LoggingAdapter): (Commitments, RevokeAndAck) = {
+  def receiveCommit(commitments: Commitments, commit: CommitSig, keyManager: KeyManager)(implicit log: LoggingAdapter): (Commitments, RevokeAndAck) = {
     import commitments._
     // they sent us a signature for *their* view of *our* next commit tx
     // so in terms of rev.hashes and indexes we have:
@@ -379,14 +396,14 @@ object Commitments {
     // receiving money i.e its commit tx has one output for them
 
     val spec = CommitmentSpec.reduce(localCommit.spec, localChanges.acked, remoteChanges.proposed)
-    val localPerCommitmentPoint = Generators.perCommitPoint(localParams.shaSeed, commitments.localCommit.index + 1)
-    val (localCommitTx, htlcTimeoutTxs, htlcSuccessTxs) = makeLocalTxs(localCommit.index + 1, localParams, remoteParams, commitInput, localPerCommitmentPoint, spec)
-    val sig = Transactions.sign(localCommitTx, localParams.fundingPrivKey)
+    val localPerCommitmentPoint = keyManager.commitmentPoint(localParams.channelKeyPath, commitments.localCommit.index + 1)
+    val (localCommitTx, htlcTimeoutTxs, htlcSuccessTxs) = makeLocalTxs(keyManager, localCommit.index + 1, localParams, remoteParams, commitInput, localPerCommitmentPoint, spec)
+    val sig = keyManager.sign(localCommitTx, keyManager.fundingPublicKey(localParams.channelKeyPath))
 
     // TODO: should we have optional sig? (original comment: this tx will NOT be signed if our output is empty)
 
     // no need to compute htlc sigs if commit sig doesn't check out
-    val signedCommitTx = Transactions.addSigs(localCommitTx, localParams.fundingPrivKey.publicKey, remoteParams.fundingPubKey, sig, commit.signature)
+    val signedCommitTx = Transactions.addSigs(localCommitTx, keyManager.fundingPublicKey(localParams.channelKeyPath).publicKey, remoteParams.fundingPubKey, sig, commit.signature)
     if (Transactions.checkSpendable(signedCommitTx).isFailure) {
       throw InvalidCommitmentSignature(commitments.channelId, signedCommitTx.tx)
     }
@@ -395,8 +412,7 @@ object Commitments {
     if (commit.htlcSignatures.size != sortedHtlcTxs.size) {
       throw new HtlcSigCountMismatch(commitments.channelId, sortedHtlcTxs.size, commit.htlcSignatures.size)
     }
-    val localHtlcKey = Generators.derivePrivKey(localParams.htlcKey, localPerCommitmentPoint)
-    val htlcSigs = sortedHtlcTxs.map(Transactions.sign(_, localHtlcKey))
+    val htlcSigs = sortedHtlcTxs.map(keyManager.sign(_, keyManager.htlcPoint(localParams.channelKeyPath), localPerCommitmentPoint))
     val remoteHtlcPubkey = Generators.derivePubKey(remoteParams.htlcBasepoint, localPerCommitmentPoint)
     // combine the sigs to make signed txes
     val htlcTxsAndSigs = (sortedHtlcTxs, htlcSigs, commit.htlcSignatures).zipped.toList.collect {
@@ -414,8 +430,8 @@ object Commitments {
     }
 
     // we will send our revocation preimage + our next revocation hash
-    val localPerCommitmentSecret = Generators.perCommitSecret(localParams.shaSeed, commitments.localCommit.index)
-    val localNextPerCommitmentPoint = Generators.perCommitPoint(localParams.shaSeed, commitments.localCommit.index + 2)
+    val localPerCommitmentSecret = keyManager.commitmentSecret(localParams.channelKeyPath, commitments.localCommit.index)
+    val localNextPerCommitmentPoint = keyManager.commitmentPoint(localParams.channelKeyPath, commitments.localCommit.index + 2)
     val revocation = RevokeAndAck(
       channelId = commitments.channelId,
       perCommitmentSecret = localPerCommitmentSecret,
@@ -460,26 +476,26 @@ object Commitments {
     }
   }
 
-  def makeLocalTxs(commitTxNumber: Long, localParams: LocalParams, remoteParams: RemoteParams, commitmentInput: InputInfo, localPerCommitmentPoint: Point, spec: CommitmentSpec): (CommitTx, Seq[HtlcTimeoutTx], Seq[HtlcSuccessTx]) = {
-    val localPaymentPubkey = Generators.derivePubKey(localParams.paymentBasepoint, localPerCommitmentPoint)
-    val localDelayedPaymentPubkey = Generators.derivePubKey(localParams.delayedPaymentBasepoint, localPerCommitmentPoint)
-    val localHtlcPubkey = Generators.derivePubKey(localParams.htlcBasepoint, localPerCommitmentPoint)
+  def makeLocalTxs(keyManager: KeyManager, commitTxNumber: Long, localParams: LocalParams, remoteParams: RemoteParams, commitmentInput: InputInfo, localPerCommitmentPoint: Point, spec: CommitmentSpec): (CommitTx, Seq[HtlcTimeoutTx], Seq[HtlcSuccessTx]) = {
+    val localPaymentPubkey = Generators.derivePubKey(keyManager.paymentPoint(localParams.channelKeyPath).publicKey, localPerCommitmentPoint)
+    val localDelayedPaymentPubkey = Generators.derivePubKey(keyManager.delayedPaymentPoint(localParams.channelKeyPath).publicKey, localPerCommitmentPoint)
+    val localHtlcPubkey = Generators.derivePubKey(keyManager.htlcPoint(localParams.channelKeyPath).publicKey, localPerCommitmentPoint)
     val remotePaymentPubkey = Generators.derivePubKey(remoteParams.paymentBasepoint, localPerCommitmentPoint)
     val remoteHtlcPubkey = Generators.derivePubKey(remoteParams.htlcBasepoint, localPerCommitmentPoint)
     val localRevocationPubkey = Generators.revocationPubKey(remoteParams.revocationBasepoint, localPerCommitmentPoint)
-    val commitTx = Transactions.makeCommitTx(commitmentInput, commitTxNumber, localParams.paymentBasepoint, remoteParams.paymentBasepoint, localParams.isFunder, Satoshi(localParams.dustLimitSatoshis), localRevocationPubkey, remoteParams.toSelfDelay, localDelayedPaymentPubkey, remotePaymentPubkey, localHtlcPubkey, remoteHtlcPubkey, spec)
+    val commitTx = Transactions.makeCommitTx(commitmentInput, commitTxNumber, keyManager.paymentPoint(localParams.channelKeyPath).publicKey, remoteParams.paymentBasepoint, localParams.isFunder, Satoshi(localParams.dustLimitSatoshis), localRevocationPubkey, remoteParams.toSelfDelay, localDelayedPaymentPubkey, remotePaymentPubkey, localHtlcPubkey, remoteHtlcPubkey, spec)
     val (htlcTimeoutTxs, htlcSuccessTxs) = Transactions.makeHtlcTxs(commitTx.tx, Satoshi(localParams.dustLimitSatoshis), localRevocationPubkey, remoteParams.toSelfDelay, localDelayedPaymentPubkey, localHtlcPubkey, remoteHtlcPubkey, spec)
     (commitTx, htlcTimeoutTxs, htlcSuccessTxs)
   }
 
-  def makeRemoteTxs(commitTxNumber: Long, localParams: LocalParams, remoteParams: RemoteParams, commitmentInput: InputInfo, remotePerCommitmentPoint: Point, spec: CommitmentSpec): (CommitTx, Seq[HtlcTimeoutTx], Seq[HtlcSuccessTx]) = {
-    val localPaymentPubkey = Generators.derivePubKey(localParams.paymentBasepoint, remotePerCommitmentPoint)
-    val localHtlcPubkey = Generators.derivePubKey(localParams.htlcBasepoint, remotePerCommitmentPoint)
+  def makeRemoteTxs(keyManager: KeyManager, commitTxNumber: Long, localParams: LocalParams, remoteParams: RemoteParams, commitmentInput: InputInfo, remotePerCommitmentPoint: Point, spec: CommitmentSpec): (CommitTx, Seq[HtlcTimeoutTx], Seq[HtlcSuccessTx]) = {
+    val localPaymentPubkey = Generators.derivePubKey(keyManager.paymentPoint(localParams.channelKeyPath).publicKey, remotePerCommitmentPoint)
+    val localHtlcPubkey = Generators.derivePubKey(keyManager.htlcPoint(localParams.channelKeyPath).publicKey, remotePerCommitmentPoint)
     val remotePaymentPubkey = Generators.derivePubKey(remoteParams.paymentBasepoint, remotePerCommitmentPoint)
     val remoteDelayedPaymentPubkey = Generators.derivePubKey(remoteParams.delayedPaymentBasepoint, remotePerCommitmentPoint)
     val remoteHtlcPubkey = Generators.derivePubKey(remoteParams.htlcBasepoint, remotePerCommitmentPoint)
-    val remoteRevocationPubkey = Generators.revocationPubKey(localParams.revocationBasepoint, remotePerCommitmentPoint)
-    val commitTx = Transactions.makeCommitTx(commitmentInput, commitTxNumber, remoteParams.paymentBasepoint, localParams.paymentBasepoint, !localParams.isFunder, Satoshi(remoteParams.dustLimitSatoshis), remoteRevocationPubkey, localParams.toSelfDelay, remoteDelayedPaymentPubkey, localPaymentPubkey, remoteHtlcPubkey, localHtlcPubkey, spec)
+    val remoteRevocationPubkey = Generators.revocationPubKey(keyManager.revocationPoint(localParams.channelKeyPath).publicKey, remotePerCommitmentPoint)
+    val commitTx = Transactions.makeCommitTx(commitmentInput, commitTxNumber, remoteParams.paymentBasepoint, keyManager.paymentPoint(localParams.channelKeyPath).publicKey, !localParams.isFunder, Satoshi(remoteParams.dustLimitSatoshis), remoteRevocationPubkey, localParams.toSelfDelay, remoteDelayedPaymentPubkey, localPaymentPubkey, remoteHtlcPubkey, localHtlcPubkey, spec)
     val (htlcTimeoutTxs, htlcSuccessTxs) = Transactions.makeHtlcTxs(commitTx.tx, Satoshi(remoteParams.dustLimitSatoshis), remoteRevocationPubkey, localParams.toSelfDelay, remoteDelayedPaymentPubkey, remoteHtlcPubkey, localHtlcPubkey, spec)
     (commitTx, htlcTimeoutTxs, htlcSuccessTxs)
   }

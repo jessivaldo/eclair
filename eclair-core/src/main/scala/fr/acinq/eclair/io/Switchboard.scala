@@ -18,9 +18,9 @@ class Switchboard(nodeParams: NodeParams, authenticator: ActorRef, watcher: Acto
   authenticator ! self
 
   // we load peers and channels from database
-  val initialPeers = {
+  private val initialPeers = {
     val channels = nodeParams.channelsDb.listChannels().groupBy(_.commitments.remoteParams.nodeId)
-    val peers = nodeParams.peersDb.listPeers().toMap
+    val peers = nodeParams.peersDb.listPeers()
     channels
       .map {
         case (remoteNodeId, states) => (remoteNodeId, states, peers.get(remoteNodeId))
@@ -29,7 +29,7 @@ class Switchboard(nodeParams: NodeParams, authenticator: ActorRef, watcher: Acto
         case (remoteNodeId, states, address_opt) =>
           // we might not have an address if we didn't initiate the connection in the first place
           val peer = createOrGetPeer(Map(), remoteNodeId, previousKnownAddress = address_opt, offlineChannels = states.toSet)
-          (remoteNodeId -> peer)
+          remoteNodeId -> peer
       }.toMap
   }
 
@@ -37,7 +37,7 @@ class Switchboard(nodeParams: NodeParams, authenticator: ActorRef, watcher: Acto
 
   def main(peers: Map[PublicKey, ActorRef]): Receive = {
 
-    case Peer.Connect(NodeURI(publicKey, _)) if publicKey == nodeParams.privateKey.publicKey =>
+    case Peer.Connect(NodeURI(publicKey, _)) if publicKey == nodeParams.nodeId =>
       sender ! Status.Failure(new RuntimeException("cannot open connection with oneself"))
 
     case c@Peer.Connect(NodeURI(remoteNodeId, _)) =>
@@ -46,7 +46,7 @@ class Switchboard(nodeParams: NodeParams, authenticator: ActorRef, watcher: Acto
       peer forward c
       context become main(peers + (remoteNodeId -> peer))
 
-    case o@Peer.OpenChannel(remoteNodeId, _, _, _) =>
+    case o@Peer.OpenChannel(remoteNodeId, _, _, _, _) =>
       peers.get(remoteNodeId) match {
         case Some(peer) => peer forward o
         case None => sender ! Status.Failure(new RuntimeException("no connection to peer"))
@@ -60,7 +60,7 @@ class Switchboard(nodeParams: NodeParams, authenticator: ActorRef, watcher: Acto
           context become main(peers - remoteNodeId)
       }
 
-    case auth@Authenticator.Authenticated(_, _, remoteNodeId, _, _) =>
+    case auth@Authenticator.Authenticated(_, _, remoteNodeId, _, _, _) =>
       // if this is an incoming connection, we might not yet have created the peer
       val peer = createOrGetPeer(peers, remoteNodeId, previousKnownAddress = None, offlineChannels = Set.empty)
       peer forward auth
@@ -84,7 +84,9 @@ class Switchboard(nodeParams: NodeParams, authenticator: ActorRef, watcher: Acto
     peers.get(remoteNodeId) match {
       case Some(peer) => peer
       case None =>
-        val peer = context.actorOf(Peer.props(nodeParams, remoteNodeId, previousKnownAddress, authenticator, watcher, router, relayer, wallet, offlineChannels), name = s"peer-$remoteNodeId")
+        log.info(s"creating new peer current=${peers.size}")
+        val peer = context.actorOf(Peer.props(nodeParams, remoteNodeId, authenticator, watcher, router, relayer, wallet), name = s"peer-$remoteNodeId")
+        peer ! Peer.Init(previousKnownAddress, offlineChannels)
         context watch (peer)
         peer
     }

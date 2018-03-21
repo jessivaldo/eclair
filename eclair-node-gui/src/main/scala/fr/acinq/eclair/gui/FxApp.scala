@@ -9,18 +9,19 @@ import javafx.scene.image.Image
 import javafx.scene.{Parent, Scene}
 import javafx.stage.{Popup, Screen, Stage, WindowEvent}
 
-import akka.actor.{ActorSystem, Props, SupervisorStrategy}
+import akka.actor.{Props, SupervisorStrategy}
 import fr.acinq.eclair._
 import fr.acinq.eclair.blockchain.bitcoind.zmq.ZMQActor._
 import fr.acinq.eclair.blockchain.electrum.ElectrumClient.ElectrumEvent
 import fr.acinq.eclair.channel.ChannelEvent
 import fr.acinq.eclair.gui.controllers.{MainController, NotificationsController}
-import fr.acinq.eclair.payment.PaymentEvent
+import fr.acinq.eclair.payment.{PaymentEvent, PaymentResult}
 import fr.acinq.eclair.router.NetworkEvent
 import grizzled.slf4j.Logging
 
+import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.Promise
-import scala.util.{Failure, Success}
+import scala.util.{Failure, Success, Try}
 
 
 /**
@@ -45,8 +46,11 @@ class FxApp extends Application with Logging {
       notifyPreloader(new ErrorNotification("Setup", "Breaking changes!", e))
       notifyPreloader(new AppNotification(InfoAppNotification, "Eclair is still in alpha, and under heavy development. Last update was not backward compatible."))
       notifyPreloader(new AppNotification(InfoAppNotification, "Please reset your datadir."))
+    case e@IncompatibleNetworkDBException =>
+      notifyPreloader(new ErrorNotification("Setup", "Unreadable network database!", e))
+      notifyPreloader(new AppNotification(InfoAppNotification, "Could not read the network database. Please remove the file and restart."))
     case t: Throwable =>
-      notifyPreloader(new ErrorNotification("Setup", s"Internal error: ${t.toString}", t))
+      notifyPreloader(new ErrorNotification("Setup", s"Error: ${t.getLocalizedMessage}", t))
   }
 
   override def start(primaryStage: Stage): Unit = {
@@ -62,16 +66,24 @@ class FxApp extends Application with Logging {
           mainFXML.setController(controller)
           val mainRoot = mainFXML.load[Parent]
           val datadir = new File(getParameters.getUnnamed.get(0))
-          implicit val system = ActorSystem("system")
           val setup = new Setup(datadir)
+
+          val unitConf = setup.config.getString("gui.unit")
+          FxApp.unit = Try(CoinUtils.getUnitFromString(unitConf)) match {
+            case Failure(_) =>
+              logger.warn(s"$unitConf is not a valid gui unit, must be msat, sat, mbtc or btc. Defaulting to btc.")
+              BtcUnit
+            case Success(u) => u
+          }
+
           val guiUpdater = setup.system.actorOf(SimpleSupervisor.props(Props(classOf[GUIUpdater], controller), "gui-updater", SupervisorStrategy.Resume))
           setup.system.eventStream.subscribe(guiUpdater, classOf[ChannelEvent])
           setup.system.eventStream.subscribe(guiUpdater, classOf[NetworkEvent])
           setup.system.eventStream.subscribe(guiUpdater, classOf[PaymentEvent])
+          setup.system.eventStream.subscribe(guiUpdater, classOf[PaymentResult])
           setup.system.eventStream.subscribe(guiUpdater, classOf[ZMQEvent])
           setup.system.eventStream.subscribe(guiUpdater, classOf[ElectrumEvent])
           pKit.completeWith(setup.bootstrap)
-          import scala.concurrent.ExecutionContext.Implicits.global
           pKit.future.onComplete {
             case Success(_) =>
               Platform.runLater(new Runnable {
@@ -124,7 +136,7 @@ class FxApp extends Application with Logging {
         popup.setHideOnEscape(false)
         popup.setAutoFix(false)
         val margin = 10
-        val width = 300
+        val width = 400
         popup.setWidth(margin + width)
         popup.getContent.add(root)
         // positioning the popup @ TOP RIGHT of screen
@@ -134,4 +146,9 @@ class FxApp extends Application with Logging {
       }
     })
   }
+}
+
+object FxApp {
+  private var unit: CoinUnit = BtcUnit
+  def getUnit = FxApp.unit
 }

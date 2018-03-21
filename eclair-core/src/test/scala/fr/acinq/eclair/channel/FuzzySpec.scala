@@ -43,15 +43,15 @@ class FuzzySpec extends TestkitBaseClass with StateTestsHelperMethods with Loggi
     val relayerB = system.actorOf(Relayer.props(Bob.nodeParams, registerB.ref, paymentHandlerB))
     val router = TestProbe()
     val wallet = new TestWallet
-    val alice: TestFSMRef[State, Data, Channel] = TestFSMRef(new Channel(Alice.nodeParams, wallet, Bob.id, alice2blockchain.ref, router.ref, relayerA))
-    val bob: TestFSMRef[State, Data, Channel] = TestFSMRef(new Channel(Bob.nodeParams, wallet, Alice.id, bob2blockchain.ref, router.ref, relayerB))
+    val alice: TestFSMRef[State, Data, Channel] = TestFSMRef(new Channel(Alice.nodeParams, wallet, Bob.nodeParams.nodeId, alice2blockchain.ref, router.ref, relayerA))
+    val bob: TestFSMRef[State, Data, Channel] = TestFSMRef(new Channel(Bob.nodeParams, wallet, Alice.nodeParams.nodeId, bob2blockchain.ref, router.ref, relayerB))
     within(30 seconds) {
       val aliceInit = Init(Alice.channelParams.globalFeatures, Alice.channelParams.localFeatures)
       val bobInit = Init(Bob.channelParams.globalFeatures, Bob.channelParams.localFeatures)
       relayerA ! alice
       relayerB ! bob
       // no announcements
-      alice ! INPUT_INIT_FUNDER("00" * 32, TestConstants.fundingSatoshis, TestConstants.pushMsat, TestConstants.feeratePerKw, Alice.channelParams, pipe, bobInit, channelFlags = 0x00.toByte)
+      alice ! INPUT_INIT_FUNDER("00" * 32, TestConstants.fundingSatoshis, TestConstants.pushMsat, TestConstants.feeratePerKw, TestConstants.feeratePerKw, Alice.channelParams, pipe, bobInit, channelFlags = 0x00.toByte)
       bob ! INPUT_INIT_FUNDEE("00" * 32, Bob.channelParams, pipe, aliceInit)
       pipe ! (alice, bob)
       alice2blockchain.expectMsgType[WatchSpent]
@@ -76,7 +76,7 @@ class FuzzySpec extends TestkitBaseClass with StateTestsHelperMethods with Loggi
     def buildCmdAdd(paymentHash: BinaryData, dest: PublicKey) = {
       // allow overpaying (no more than 2 times the required amount)
       val amount = requiredAmount + Random.nextInt(requiredAmount)
-      val expiry = Globals.blockCount.get().toInt + PaymentLifecycle.defaultMinFinalCltvExpiry
+      val expiry = Globals.blockCount.get().toInt + Channel.MIN_CLTV_EXPIRY + 1
       PaymentLifecycle.buildCommand(amount, expiry, paymentHash, Hop(null, dest, null) :: Nil)._1
     }
 

@@ -2,20 +2,13 @@ package fr.acinq.eclair.gui.utils
 
 import javafx.scene.control.Label
 
-import fr.acinq.eclair.io.NodeURI
-
 import scala.util.matching.Regex
 
 /**
   * Created by DPA on 27/09/2016.
   */
 object GUIValidators {
-  val hostRegex = NodeURI.regex
-  val amountRegex = """\d+""".r
   val amountDecRegex = """(\d+)|(\d*\.[\d]{1,})""".r
-  val paymentRequestRegex =
-    """([a-zA-Z0-9]+):([a-zA-Z0-9]+):([a-zA-Z0-9]+)""".r
-  val hexRegex = """[0-9a-fA-F]+""".r
 
   /**
     * Validate a field against a regex. If field does not match the regex, validatorLabel is shown.
@@ -37,7 +30,7 @@ object GUIValidators {
   /**
     * Displays a label with an error message.
     *
-    * @param errorLabel     JFX label containing an error messsage
+    * @param errorLabel     JFX label containing an error message
     * @param validCondition if true the label is hidden, else it is shown
     * @return true if field is valid, false otherwise
     */

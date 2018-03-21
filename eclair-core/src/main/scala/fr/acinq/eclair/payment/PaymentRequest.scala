@@ -6,6 +6,7 @@ import java.nio.ByteOrder
 import fr.acinq.bitcoin.Bech32.Int5
 import fr.acinq.bitcoin.Crypto.{PrivateKey, PublicKey}
 import fr.acinq.bitcoin.{BinaryData, MilliSatoshi, _}
+import fr.acinq.eclair.ShortChannelId
 import fr.acinq.eclair.crypto.BitStream
 import fr.acinq.eclair.crypto.BitStream.Bit
 import fr.acinq.eclair.payment.PaymentRequest.{Amount, ExtraHop, RoutingInfoTag, Timestamp}
@@ -34,13 +35,13 @@ case class PaymentRequest(prefix: String, amount: Option[MilliSatoshi], timestam
     *
     * @return the payment hash
     */
-  def paymentHash = tags.collectFirst { case p: PaymentRequest.PaymentHashTag => p }.get.hash
+  lazy val paymentHash = tags.collectFirst { case p: PaymentRequest.PaymentHashTag => p }.get.hash
 
   /**
     *
     * @return the description of the payment, or its hash
     */
-  def description: Either[String, BinaryData] = tags.collectFirst {
+  lazy val description: Either[String, BinaryData] = tags.collectFirst {
     case PaymentRequest.DescriptionTag(d) => Left(d)
     case PaymentRequest.DescriptionHashTag(h) => Right(h)
   }.get
@@ -58,13 +59,13 @@ case class PaymentRequest(prefix: String, amount: Option[MilliSatoshi], timestam
     case PaymentRequest.FallbackAddressTag(version, hash) if prefix == "lntb" => Bech32.encodeWitnessAddress("tb", version, hash)
   }
 
-  def routingInfo(): Seq[Seq[ExtraHop]] = tags.collect { case t: RoutingInfoTag => t.path }
+  lazy val routingInfo: Seq[Seq[ExtraHop]] = tags.collect { case t: RoutingInfoTag => t.path }
 
-  def expiry: Option[Long] = tags.collectFirst {
+  lazy val expiry: Option[Long] = tags.collectFirst {
     case PaymentRequest.ExpiryTag(seconds) => seconds
   }
 
-  def minFinalCltvExpiry: Option[Long] = tags.collectFirst {
+  lazy val minFinalCltvExpiry: Option[Long] = tags.collectFirst {
     case PaymentRequest.MinFinalCltvExpiryTag(expiry) => expiry
   }
 
@@ -122,7 +123,7 @@ object PaymentRequest {
       tags = List(
         Some(PaymentHashTag(paymentHash)),
         Some(DescriptionTag(description)),
-        expirySeconds.map(ExpiryTag(_))
+        expirySeconds.map(ExpiryTag)
       ).flatten ++ extraHops.map(RoutingInfoTag(_)),
       signature = BinaryData.empty)
       .sign(privateKey)
@@ -221,8 +222,8 @@ object PaymentRequest {
     * @param feeProportionalMillionths  node proportional fee
     * @param cltvExpiryDelta node cltv expiry delta
     */
-  case class ExtraHop(nodeId: PublicKey, shortChannelId: Long, feeBaseMsat: Long, feeProportionalMillionths: Long, cltvExpiryDelta: Int) {
-    def pack: Seq[Byte] = nodeId.toBin ++ Protocol.writeUInt64(shortChannelId, ByteOrder.BIG_ENDIAN) ++
+  case class ExtraHop(nodeId: PublicKey, shortChannelId: ShortChannelId, feeBaseMsat: Long, feeProportionalMillionths: Long, cltvExpiryDelta: Int) {
+    def pack: Seq[Byte] = nodeId.toBin ++ Protocol.writeUInt64(shortChannelId.toLong, ByteOrder.BIG_ENDIAN) ++
       Protocol.writeUInt32(feeBaseMsat, ByteOrder.BIG_ENDIAN) ++ Protocol.writeUInt32(feeProportionalMillionths, ByteOrder.BIG_ENDIAN) ++ Protocol.writeUInt16(cltvExpiryDelta, ByteOrder.BIG_ENDIAN)
   }
 
@@ -245,7 +246,7 @@ object PaymentRequest {
       val fee_base_msat = Protocol.uint32(data.slice(33 + 8, 33 + 8 + 4), ByteOrder.BIG_ENDIAN)
       val fee_proportional_millionths = Protocol.uint32(data.slice(33 + 8 + 4, 33 + 8 + 8), ByteOrder.BIG_ENDIAN)
       val cltv = Protocol.uint16(data.slice(33 + 8 + 8, chunkLength), ByteOrder.BIG_ENDIAN)
-      ExtraHop(PublicKey(pubkey), shortChannelId, fee_base_msat, fee_proportional_millionths, cltv)
+      ExtraHop(PublicKey(pubkey), ShortChannelId(shortChannelId), fee_base_msat, fee_proportional_millionths, cltv)
     }
 
     def parseAll(data: Seq[Byte]): Seq[ExtraHop] =
@@ -365,7 +366,7 @@ object PaymentRequest {
   object Signature {
     /**
       *
-      * @param signature 65-bytes signatyre: r (32 bytes) | s (32 bytes) | recid (1 bytes)
+      * @param signature 65-bytes signature: r (32 bytes) | s (32 bytes) | recid (1 bytes)
       * @return a (r, s, recoveryId)
       */
     def decode(signature: BinaryData): (BigInteger, BigInteger, Byte) = {
@@ -392,7 +393,7 @@ object PaymentRequest {
     *
     * @param stream stream to write to
     * @param value  a 5bits value
-    * @return an upated stream
+    * @return an updated stream
     */
   def write5(stream: BitStream, value: Int5): BitStream = stream.writeBits(toBits(value))
 

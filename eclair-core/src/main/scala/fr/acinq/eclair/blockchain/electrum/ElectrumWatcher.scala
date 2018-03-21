@@ -9,7 +9,7 @@ import fr.acinq.eclair.blockchain._
 import fr.acinq.eclair.blockchain.electrum.ElectrumClient._
 import fr.acinq.eclair.channel.{BITCOIN_FUNDING_DEPTHOK, BITCOIN_FUNDING_SPENT, BITCOIN_PARENT_TX_CONFIRMED}
 import fr.acinq.eclair.transactions.Scripts
-import fr.acinq.eclair.{Globals, fromShortId}
+import fr.acinq.eclair.{Globals, ShortChannelId, TxCoordinates}
 
 import scala.collection.SortedMap
 
@@ -19,18 +19,17 @@ class ElectrumWatcher(client: ActorRef) extends Actor with Stash with ActorLoggi
   client ! ElectrumClient.AddStatusListener(self)
 
   override def unhandled(message: Any): Unit = message match {
-    case ParallelGetRequest(announcements) => sender ! ParallelGetResponse(announcements.map {
-      case c =>
+    case ValidateRequest(c) =>
         log.info(s"blindly validating channel=$c")
         val pubkeyScript = Script.write(Script.pay2wsh(Scripts.multiSig2of2(PublicKey(c.bitcoinKey1), PublicKey(c.bitcoinKey2))))
-        val (_, _, outputIndex) = fromShortId(c.shortChannelId)
+        val TxCoordinates(_, _, outputIndex) = ShortChannelId.coordinates(c.shortChannelId)
         val fakeFundingTx = Transaction(
           version = 2,
           txIn = Seq.empty[TxIn],
           txOut = List.fill(outputIndex + 1)(TxOut(Satoshi(0), pubkeyScript)), // quick and dirty way to be sure that the outputIndex'th output is of the expected format
           lockTime = 0)
-        IndividualResult(c, Some(fakeFundingTx), true)
-    })
+      sender ! ValidateResult(c, Some(fakeFundingTx), true, None)
+
     case _ => log.warning(s"unhandled message $message")
   }
 
@@ -184,7 +183,7 @@ class ElectrumWatcher(client: ActorRef) extends Actor with Stash with ActorLoggi
 
     case ElectrumClient.ElectrumDisconnected =>
       // we remember watches and keep track of tx that have not yet been published
-      // we also re-send the txes that we previsouly sent but hadn't yet received the confirmation
+      // we also re-send the txes that we previously sent but hadn't yet received the confirmation
       context become disconnected(watches, sent.map(PublishAsap(_)), block2tx)
   }
 

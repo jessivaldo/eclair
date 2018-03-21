@@ -17,6 +17,7 @@ class ChannelPaneController(val theirNodeIdValue: String) extends Logging {
 
   @FXML var root: VBox = _
   @FXML var channelId: TextField = _
+  @FXML var txId: TextField = _
   @FXML var balanceBar: ProgressBar = _
   @FXML var amountUs: TextField = _
   @FXML var nodeId: TextField = _
@@ -24,15 +25,17 @@ class ChannelPaneController(val theirNodeIdValue: String) extends Logging {
   @FXML var funder: TextField = _
   @FXML var state: TextField = _
   @FXML var close: Button = _
+  @FXML var forceclose: Button = _
 
   var contextMenu: ContextMenu = _
 
-  private def buildChannelContextMenu = {
+  private def buildChannelContextMenu() = {
     Platform.runLater(new Runnable() {
-      override def run = {
+      override def run() = {
         contextMenu = ContextMenuUtils.buildCopyContext(List(
-          new CopyAction("Copy Channel Id", channelId.getText),
-          new CopyAction("Copy Peer Pubkey", theirNodeIdValue)
+          CopyAction("Copy Channel Id", channelId.getText),
+          CopyAction("Copy Peer Pubkey", theirNodeIdValue),
+          CopyAction("Copy Tx Id", txId.getText())
         ))
         contextMenu.getStyleClass.add("context-channel")
         channelId.setContextMenu(contextMenu)
@@ -45,20 +48,20 @@ class ChannelPaneController(val theirNodeIdValue: String) extends Logging {
     })
   }
 
-  @FXML def initialize = {
+  @FXML def initialize() = {
     channelId.textProperty.addListener(new ChangeListener[String] {
-      override def changed(observable: ObservableValue[_ <: String], oldValue: String, newValue: String) = buildChannelContextMenu
+      override def changed(observable: ObservableValue[_ <: String], oldValue: String, newValue: String) = buildChannelContextMenu()
     })
-    buildChannelContextMenu
+    buildChannelContextMenu()
   }
 
   @FXML def openChannelContext(event: ContextMenuEvent) {
     contextMenu.show(channelId, event.getScreenX, event.getScreenY)
-    event.consume
+    event.consume()
   }
 
   @FXML def closeChannelContext(event: MouseEvent) {
-    if (contextMenu != null) contextMenu.hide
+    if (contextMenu != null) contextMenu.hide()
   }
 
   def updateRemoteNodeAlias(alias: String) {

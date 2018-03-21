@@ -31,7 +31,7 @@ class WaitForAcceptChannelStateSpec extends TestkitBaseClass with StateTestsHelp
     val aliceInit = Init(Alice.channelParams.globalFeatures, Alice.channelParams.localFeatures)
     val bobInit = Init(Bob.channelParams.globalFeatures, Bob.channelParams.localFeatures)
     within(30 seconds) {
-      alice ! INPUT_INIT_FUNDER("00" * 32, TestConstants.fundingSatoshis, TestConstants.pushMsat, TestConstants.feeratePerKw, Alice.channelParams, alice2bob.ref, bobInit, ChannelFlags.Empty)
+      alice ! INPUT_INIT_FUNDER("00" * 32, TestConstants.fundingSatoshis, TestConstants.pushMsat, TestConstants.feeratePerKw, TestConstants.feeratePerKw, Alice.channelParams, alice2bob.ref, bobInit, ChannelFlags.Empty)
       bob ! INPUT_INIT_FUNDEE("00" * 32, Bob.channelParams, bob2alice.ref, aliceInit)
       alice2bob.expectMsgType[OpenChannel]
       alice2bob.forward(bob)
@@ -55,7 +55,7 @@ class WaitForAcceptChannelStateSpec extends TestkitBaseClass with StateTestsHelp
       val invalidMaxAcceptedHtlcs = 484
       alice ! accept.copy(maxAcceptedHtlcs = invalidMaxAcceptedHtlcs)
       val error = alice2bob.expectMsgType[Error]
-      assert(error === Error(accept.temporaryChannelId, new InvalidMaxAcceptedHtlcs(accept.temporaryChannelId, invalidMaxAcceptedHtlcs, Channel.MAX_ACCEPTED_HTLCS).getMessage.getBytes("UTF-8")))
+      assert(error === Error(accept.temporaryChannelId, InvalidMaxAcceptedHtlcs(accept.temporaryChannelId, invalidMaxAcceptedHtlcs, Channel.MAX_ACCEPTED_HTLCS).getMessage.getBytes("UTF-8")))
       awaitCond(alice.stateName == CLOSED)
     }
   }
@@ -67,7 +67,18 @@ class WaitForAcceptChannelStateSpec extends TestkitBaseClass with StateTestsHelp
       val lowDustLimitSatoshis = 545
       alice ! accept.copy(dustLimitSatoshis = lowDustLimitSatoshis)
       val error = alice2bob.expectMsgType[Error]
-      assert(error === Error(accept.temporaryChannelId, new InvalidDustLimit(accept.temporaryChannelId, lowDustLimitSatoshis, Channel.MIN_DUSTLIMIT).getMessage.getBytes("UTF-8")))
+      assert(error === Error(accept.temporaryChannelId, InvalidDustLimit(accept.temporaryChannelId, lowDustLimitSatoshis, Channel.MIN_DUSTLIMIT).getMessage.getBytes("UTF-8")))
+      awaitCond(alice.stateName == CLOSED)
+    }
+  }
+
+  test("recv AcceptChannel (to_self_delay too high)") { case (alice, alice2bob, bob2alice, _) =>
+    within(30 seconds) {
+      val accept = bob2alice.expectMsgType[AcceptChannel]
+      val delayTooHigh = 10000
+      alice ! accept.copy(toSelfDelay = delayTooHigh)
+      val error = alice2bob.expectMsgType[Error]
+      assert(error === Error(accept.temporaryChannelId, ToSelfDelayTooHigh(accept.temporaryChannelId, delayTooHigh, Alice.nodeParams.maxToLocalDelayBlocks).getMessage.getBytes("UTF-8")))
       awaitCond(alice.stateName == CLOSED)
     }
   }
@@ -79,7 +90,7 @@ class WaitForAcceptChannelStateSpec extends TestkitBaseClass with StateTestsHelp
       val reserveTooHigh = (0.3 * TestConstants.fundingSatoshis).toLong
       alice ! accept.copy(channelReserveSatoshis = reserveTooHigh)
       val error = alice2bob.expectMsgType[Error]
-      assert(error === Error(accept.temporaryChannelId, new ChannelReserveTooHigh(accept.temporaryChannelId, reserveTooHigh, 0.3,  0.05).getMessage.getBytes("UTF-8")))
+      assert(error === Error(accept.temporaryChannelId, ChannelReserveTooHigh(accept.temporaryChannelId, reserveTooHigh, 0.3,  0.05).getMessage.getBytes("UTF-8")))
       awaitCond(alice.stateName == CLOSED)
     }
   }

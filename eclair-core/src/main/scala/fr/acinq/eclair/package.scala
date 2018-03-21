@@ -30,26 +30,6 @@ package object eclair {
     BinaryData(channelId)
   }
 
-  /**
-    * Creates a unique index assigned to a channel (== an unspent multisig 2-of-2 output)
-    *
-    * @param blockHeight
-    * @param txIndex
-    * @param outputIndex
-    * @return channelId
-    */
-  def toShortId(blockHeight: Int, txIndex: Int, outputIndex: Int): Long =
-    ((blockHeight & 0xFFFFFFL) << 40) | ((txIndex & 0xFFFFFFL) << 16) | (outputIndex & 0xFFFFL)
-
-  /**
-    *
-    * @param id
-    * @return (blockHeight, txIndex, outputIndex)
-    */
-  def fromShortId(id: Long): (Int, Int, Int) =
-    (((id >> 40) & 0xFFFFFF).toInt, ((id >> 16) & 0xFFFFFF).toInt, (id & 0xFFFF).toInt)
-
-
   def serializationResult(attempt: Attempt[BitVector]): BinaryData = attempt match {
     case Attempt.Successful(bin) => BinaryData(bin.toByteArray)
     case Attempt.Failure(cause) => throw new RuntimeException(s"serialization error: $cause")
@@ -79,4 +59,13 @@ package object eclair {
     * @param data to check
     */
   def isAsciiPrintable(data: BinaryData): Boolean = data.data.forall(ch => ch >= 32 && ch < 127)
+
+  /**
+    *
+    * @param baseMsat     fixed fee
+    * @param proportional proportional fee
+    * @param msat         amount in millisatoshi
+    * @return the fee (in msat) that a node should be paid to forward an HTLC of 'amount' millisatoshis
+    */
+  def nodeFee(baseMsat: Long, proportional: Long, msat: Long): Long = baseMsat + (proportional * msat) / 1000000
 }
